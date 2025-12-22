@@ -1,0 +1,20 @@
+# Python temporary files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment files
+.env
+amp-env/
+venv/
+env/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Large model weights (Ignoring the main one because we use LFS)
+# model_files/tf_model.h5 is handled by .gitattributes, 
+# but we ignore other bulky logs
+*.log
+.ipynb_checkpoints/
