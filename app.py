@@ -1,8 +1,7 @@
 import streamlit as st
-import tensorflow as tf
-from transformers import BertTokenizer, TFBertForSequenceClassification 
-import numpy as np
+import requests
 import pandas as pd
+import numpy as np
 from Bio import SeqIO
 from io import StringIO
 
@@ -16,68 +15,42 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 2. MODEL LOADING
-HF_MODEL_PATH = "Pharmson/temp-pharmson-weights-beta"
+# 2. API CONFIGURATION
+API_URL = "https://api-inference.huggingface.co/models/Pharmson/temp-pharmson-weights-beta"
+HF_TOKEN = st.secrets["HF_TOKEN"]
 
-@st.cache_resource
-def load_model():
-    tokenizer = BertTokenizer.from_pretrained(
-        "Rostlab/prot_bert", 
-        do_lower_case=False,
-        local_files_only=False
-    )
-    
-    model = TFBertForSequenceClassification.from_pretrained(
-        HF_MODEL_PATH,
-        from_pt=False
-    )
-    
-    return tokenizer, model
+headers = {"Authorization": f"Bearer {HF_TOKEN}"}
 
-
-try:
-    with st.spinner("Downloading Model... This may take a few minutes"):
-        tokenizer, model = load_model()
-    st.success("Model loaded successfully!")
-except Exception as e:
-    st.error(f"Failed to load model. Error: {e}")
-    st.stop()
-
-
-# BASE_PROTBERT = "Rostlab/prot_bert"
-
-# @st.cache_resource
-# def load_model():
-#     tokenizer = BertTokenizer.from_pretrained(BASE_PROTBERT, do_lower_case=False)
-#     model = TFBertForSequenceClassification.from_pretrained(HF_MODEL_PATH)
-#     return tokenizer, model
-
-# tokenizer, model = load_model()
+def query_api(text):
+    # ProtBERT models need spaces between amino acids
+    spaced_text = " ".join(list(text.strip().replace(" ", "")))
+    response = requests.post(API_URL, headers=headers, json={"inputs": spaced_text})
+    return response.json()
 
 # 3. CORE LOGIC
-def preprocess_sequence(seq):
-    return " ".join(list(seq.strip().replace(" ", "")))
-
 def run_prediction(sequences, names):
     results = []
     progress_bar = st.progress(0)
     
     for i, (seq, name) in enumerate(zip(sequences, names)):
-        if len(seq.strip()) < 5:
-            results.append({"ID": name, "Sequence": seq, "Prediction": "Too Short (<5)", "Confidence": 0.0})
-        else:
-            processed = preprocess_sequence(seq)
-            inputs = tokenizer(processed, return_tensors="tf", padding=True, truncation=True, max_length=190)
-            logits = model(inputs).logits
-            probs = tf.nn.softmax(logits, axis=1).numpy()[0]
+        try:
+            output = query_api(seq)
+            # The API returns: [[{'label': 'LABEL_0', 'score': 0.1}, {'label': 'LABEL_1', 'score': 0.9}]]
+            scores = output[0] 
             
-            is_amp = np.argmax(probs) == 1
+            # Assuming Index 1 is AMP and Index 0 is Non-AMP
+            is_amp = scores[1]['score'] > scores[0]['score']
+            confidence = scores[1]['score'] if is_amp else scores[0]['score']
+            
             results.append({
                 "ID": name,
                 "Sequence": seq,
                 "Prediction": "AMP" if is_amp else "Non-AMP",
-                "Confidence": round(float(probs[1] if is_amp else probs[0]), 4)
+                "Confidence": round(float(confidence), 4)
             })
+        except Exception:
+            results.append({"ID": name, "Sequence": seq, "Prediction": "API Loading/Error", "Confidence": 0.0})
+            
         progress_bar.progress((i + 1) / len(sequences))
     return pd.DataFrame(results)
 
@@ -93,13 +66,19 @@ with tab1:
         if len(user_seq) < 5:
             st.warning("Sequence must be at least 5 amino acids long.")
         else:
-            processed = preprocess_sequence(user_seq)
-            inputs = tokenizer(processed, return_tensors="tf", padding=True, truncation=True, max_length=190)
-            probs = tf.nn.softmax(model(inputs).logits, axis=1).numpy()[0]
-            if np.argmax(probs) == 1:
-                st.success(f"**Result: AMP** (Confidence: {probs[1]:.2%})")
-            else:
-                st.error(f"**Result: Non-AMP** (Confidence: {probs[0]:.2%})")
+            with st.spinner("Analyzing..."):
+                data = query_api(user_seq)
+                try:
+                    scores = data[0]
+                    amp_prob = scores[1]['score']
+                    non_amp_prob = scores[0]['score']
+                    
+                    if amp_prob > non_amp_prob:
+                        st.success(f"**Result: AMP** (Confidence: {amp_prob:.2%})")
+                    else:
+                        st.error(f"**Result: Non-AMP** (Confidence: {non_amp_prob:.2%})")
+                except:
+                    st.error("Model is still waking up on Hugging Face. Please try again in 30 seconds.")
 
 with tab2:
     st.subheader("Multiple Sequence Input")
@@ -126,8 +105,8 @@ with tab2:
 
     if st.button("Analyze All"):
         if not sequences:
-            st.error("No sequences found. Ensure they are in FASTA format (starting with '>')")
+            st.error("No sequences found. Ensure they are in FASTA format.")
         else:
             df = run_prediction(sequences, names)
-            st.dataframe(df, width="stretch")
+            st.dataframe(df, use_container_width=True)
             st.download_button("Download Results", df.to_csv(index=False), "results.csv", "text/csv")
