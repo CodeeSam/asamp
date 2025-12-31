@@ -17,14 +17,15 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # 2. MODEL LOADING
+HF_MODEL_PATH = "Pharmson/temp-pharmson-weights-beta" 
+
 @st.cache_resource
-def load_assets():
-    tokenizer = BertTokenizer.from_pretrained("Rostlab/prot_bert_bfd", do_lower_case=False)
-    model = TFBertForSequenceClassification.from_pretrained("./model_files")
+def load_model():
+    tokenizer = BertTokenizer.from_pretrained.from_pretrained(HF_MODEL_PATH)
+    model = TFBertForSequenceClassification.from_pretrained(HF_MODEL_PATH)
     return tokenizer, model
 
-with st.spinner("Loading Predictor..."):
-    tokenizer, model = load_assets()
+tokenizer, model = load_model()
 
 # 3. CORE LOGIC
 def preprocess_sequence(seq):
