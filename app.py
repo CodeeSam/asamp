@@ -1,11 +1,14 @@
 import streamlit as st
 import os
 import zipfile
-from transformers import TFBertForSequenceClassification, BertTokenizer
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch
+import requests
+import pandas as pd
+import numpy as np
 from Bio import SeqIO
 from io import StringIO
-import numpy as np
-import pandas as pd
+import gdown
 
 # ----------------------
 # 1. PAGE CONFIGURATION
@@ -27,9 +30,10 @@ MODEL_ZIP = "trained_model.zip"
 FILE_ID = "1f27bgt-1gJ3iVJWrXnOkYJ6uKPPJLcww"
 DOWNLOAD_URL = f"https://drive.google.com/uc?id={FILE_ID}"
 
-import gdown
-
-@st.cache_resource
+# ----------------------
+# 3. LOAD MODEL (PyTorch)
+# ----------------------
+@st.cache_resource(show_spinner="Loading model (this may take ~1 min)...")
 def load_model():
     # Download ZIP if not exists
     if not os.path.exists(MODEL_DIR):
@@ -38,30 +42,42 @@ def load_model():
 
         # Extract ZIP
         with zipfile.ZipFile(MODEL_ZIP, "r") as zip_ref:
-            zip_ref.extractall(MODEL_DIR)
-    
-    # Load model and tokenizer
-    model = TFBertForSequenceClassification.from_pretrained(MODEL_DIR)
-    tokenizer = BertTokenizer.from_pretrained(MODEL_DIR)
-    
+            zip_ref.extractall(".")
+
+    # Load tokenizer and PyTorch model
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
+    model = AutoModelForSequenceClassification.from_pretrained(MODEL_DIR, device_map="cpu")
+    model.eval()  # set to evaluation mode
     return model, tokenizer
 
 model, tokenizer = load_model()
 
 # ----------------------
-# 3. CORE LOGIC FOR PREDICTION
+# 4. CORE LOGIC FOR PREDICTION
 # ----------------------
 def predict_sequence(seq):
     # Tokenize
-    tokens = tokenizer(" ".join(list(seq.strip().replace(" ", ""))),
-                       return_tensors="tf", padding=True, truncation=True)
-    outputs = model(tokens)
-    logits = outputs.logits.numpy()[0]
+    inputs = tokenizer(" ".join(list(seq.strip().replace(" ", ""))),
+                       return_tensors="pt", padding=True, truncation=True)
+    with torch.no_grad():
+        outputs = model(**inputs)
+        probs = torch.nn.functional.softmax(outputs.logits, dim=-1)[0]
+    
+    # Index 1 = AMP, 0 = Non-AMP
+    if probs[1] > probs[0]:
+        return "AMP", float(probs[1])
+    else:
+        return "Non-AMP", float(probs[0])
 
-    # Assuming Index 1 = AMP, Index 0 = Non-AMP
-    is_amp = logits[1] > logits[0]
-    confidence = float(logits[1]) if is_amp else float(logits[0])
-    return "AMP" if is_amp else "Non-AMP", round(confidence, 4)
+# Optional: HF API fallback
+API_URL = "https://api-inference.huggingface.co/models/Pharmson/temp-pharmson-weights-beta"
+HF_TOKEN = st.secrets.get("HF_TOKEN", "")
+headers = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
+
+def query_api(text):
+    spaced_text = " ".join(list(text.strip().replace(" ", "")))
+    response = requests.post(API_URL, headers=headers, json={"inputs": spaced_text})
+    return response.json()
 
 def run_prediction(sequences, names):
     results = []
@@ -70,21 +86,30 @@ def run_prediction(sequences, names):
     for i, (seq, name) in enumerate(zip(sequences, names)):
         try:
             pred, conf = predict_sequence(seq)
-            results.append({
-                "ID": name,
-                "Sequence": seq,
-                "Prediction": pred,
-                "Confidence": conf
-            })
+            results.append({"ID": name, "Sequence": seq, "Prediction": pred, "Confidence": round(conf, 4)})
         except Exception:
-            results.append({"ID": name, "Sequence": seq, "Prediction": "Error", "Confidence": 0.0})
-        
+            if headers:
+                try:
+                    output = query_api(seq)
+                    scores = output[0]
+                    is_amp = scores[1]['score'] > scores[0]['score']
+                    confidence = scores[1]['score'] if is_amp else scores[0]['score']
+                    results.append({
+                        "ID": name,
+                        "Sequence": seq,
+                        "Prediction": "AMP" if is_amp else "Non-AMP",
+                        "Confidence": round(float(confidence), 4)
+                    })
+                except Exception:
+                    results.append({"ID": name, "Sequence": seq, "Prediction": "API Loading/Error", "Confidence": 0.0})
+            else:
+                results.append({"ID": name, "Sequence": seq, "Prediction": "Error", "Confidence": 0.0})
+
         progress_bar.progress((i + 1) / len(sequences))
-    
     return pd.DataFrame(results)
 
 # ----------------------
-# 4. STREAMLIT INTERFACE
+# 5. STREAMLIT INTERFACE
 # ----------------------
 st.title("ASAMP")
 st.subheader("AntiMicrobial Peptide Predictor")
