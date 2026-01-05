@@ -41,7 +41,7 @@ def load_model():
             zip_ref.extractall(MODEL_DIR)
     
     # Load model and tokenizer
-    model = TFBertForSequenceClassification.from_pretrained(MODEL_DIR, from_tf=True)
+    model = TFBertForSequenceClassification.from_pretrained(MODEL_DIR)
     tokenizer = BertTokenizer.from_pretrained(MODEL_DIR)
     
     return model, tokenizer
