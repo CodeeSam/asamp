@@ -1,29 +1,28 @@
 import streamlit as st
 import os
 import zipfile
+import gdown
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
-import requests
 import pandas as pd
-import numpy as np
 from Bio import SeqIO
 from io import StringIO
-import gdown
+import requests
 
 # ----------------------
 # 1. PAGE CONFIGURATION
 # ----------------------
-st.set_page_config(page_title="AntiMicrobial Peptide Predictor", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="ASAMP", page_icon="🧬", layout="wide")
 
 st.markdown("""
     <style>
     .main { background-color: #f4f7f9; }
     .stButton>button { width: 100%; border-radius: 5px; height: 3em; background-color: #004a99; color: white; }
     </style>
-    """, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
 # ----------------------
-# 2. GOOGLE DRIVE MODEL CONFIG
+# 2. MODEL CONFIG
 # ----------------------
 MODEL_DIR = "model_files"
 MODEL_ZIP = "trained_model.zip"
@@ -33,7 +32,7 @@ DOWNLOAD_URL = f"https://drive.google.com/uc?id={FILE_ID}"
 # ----------------------
 # 3. LOAD MODEL (PyTorch)
 # ----------------------
-@st.cache_resource(show_spinner="Loading model (this may take ~1 min)...")
+@st.cache_resource(show_spinner="Downloading and loading model...")
 def load_model():
     # Download ZIP if not exists
     if not os.path.exists(MODEL_DIR):
@@ -44,42 +43,48 @@ def load_model():
         with zipfile.ZipFile(MODEL_ZIP, "r") as zip_ref:
             zip_ref.extractall(".")
 
-    # Load tokenizer and PyTorch model
+    # Ensure folder exists
+    if not os.path.exists(MODEL_DIR):
+        st.error("Model folder not found after extraction!")
+        st.stop()
+
+    # Load tokenizer & PyTorch model
     tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
     model = AutoModelForSequenceClassification.from_pretrained(MODEL_DIR, device_map="cpu")
-    model.eval()  # set to evaluation mode
+    model.eval()
     return model, tokenizer
 
 model, tokenizer = load_model()
 
 # ----------------------
-# 4. CORE LOGIC FOR PREDICTION
+# 4. PREDICTION FUNCTIONS
 # ----------------------
 def predict_sequence(seq):
-    # Tokenize
-    inputs = tokenizer(" ".join(list(seq.strip().replace(" ", ""))),
+    """Predict single sequence."""
+    tokens = tokenizer(" ".join(list(seq.strip().replace(" ", ""))),
                        return_tensors="pt", padding=True, truncation=True)
     with torch.no_grad():
-        outputs = model(**inputs)
+        outputs = model(**tokens)
         probs = torch.nn.functional.softmax(outputs.logits, dim=-1)[0]
-    
+
     # Index 1 = AMP, 0 = Non-AMP
     if probs[1] > probs[0]:
         return "AMP", float(probs[1])
     else:
         return "Non-AMP", float(probs[0])
 
-# Optional: HF API fallback
+# Hugging Face API fallback
 API_URL = "https://api-inference.huggingface.co/models/Pharmson/temp-pharmson-weights-beta"
 HF_TOKEN = st.secrets.get("HF_TOKEN", "")
 headers = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
 
-def query_api(text):
-    spaced_text = " ".join(list(text.strip().replace(" ", "")))
+def query_api(seq):
+    spaced_text = " ".join(list(seq.strip().replace(" ", "")))
     response = requests.post(API_URL, headers=headers, json={"inputs": spaced_text})
     return response.json()
 
 def run_prediction(sequences, names):
+    """Batch prediction with progress bar."""
     results = []
     progress_bar = st.progress(0)
 
@@ -88,6 +93,7 @@ def run_prediction(sequences, names):
             pred, conf = predict_sequence(seq)
             results.append({"ID": name, "Sequence": seq, "Prediction": pred, "Confidence": round(conf, 4)})
         except Exception:
+            # fallback to HF API if available
             if headers:
                 try:
                     output = query_api(seq)
@@ -101,7 +107,7 @@ def run_prediction(sequences, names):
                         "Confidence": round(float(confidence), 4)
                     })
                 except Exception:
-                    results.append({"ID": name, "Sequence": seq, "Prediction": "API Loading/Error", "Confidence": 0.0})
+                    results.append({"ID": name, "Sequence": seq, "Prediction": "API Error", "Confidence": 0.0})
             else:
                 results.append({"ID": name, "Sequence": seq, "Prediction": "Error", "Confidence": 0.0})
 
@@ -116,6 +122,7 @@ st.subheader("AntiMicrobial Peptide Predictor")
 
 tab1, tab2 = st.tabs(["Single Prediction", "Batch Prediction"])
 
+# ---- Single Prediction ----
 with tab1:
     user_seq = st.text_input("Enter Sequence:", placeholder="e.g., KLLKLLK")
     if st.button("Predict"):
@@ -129,6 +136,7 @@ with tab1:
                 else:
                     st.error(f"**Result: Non-AMP** (Confidence: {conf:.2%})")
 
+# ---- Batch Prediction ----
 with tab2:
     st.subheader("Multiple Sequence Input")
     st.write("Paste multiple sequences in FASTA format or upload a file.")
